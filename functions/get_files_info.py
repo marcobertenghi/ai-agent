@@ -15,10 +15,24 @@ def get_files_info(working_directory: str, directory: str = ".") -> str:
         if not valid_target_dir:
             return f'Error: Cannot list "{directory}" as it is outside the permitted working directory"'
 
-        if not os.path.isdir(directory):
+        if not os.path.isdir(target_dir):
             return f'Error: "{directory}" is not a directory'
-        else:
-            return f'Success: "{directory}" is within the working directory'
 
+        # We can assume here, that path validation succeeded.
+
+        lines = []
+
+        if directory == ".":
+            lines.append("Result for current directory:")
+        else:
+            lines.append(f"Result for '{directory}' directory:")
+
+        for item in os.listdir(target_dir):
+            item_path = os.path.join(target_dir, item)
+            is_dir = os.path.isdir(item_path)  # Boolean
+            file_size = os.path.getsize(item_path)
+            lines.append(f"  - {item}: file_size={file_size} bytes, is_dir={is_dir}")
+
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
