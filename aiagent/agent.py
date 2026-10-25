@@ -1,8 +1,9 @@
 """The entire agent loop: ask the model, dispatch bounded tools, repeat."""
 
-import sys
+import time
 
 from aiagent.config import Config
+from aiagent.display import Progress
 from aiagent.tools import ToolRegistry
 
 
@@ -11,8 +12,17 @@ class AgentError(RuntimeError):
 
 
 def run_agent(
-    client, config: Config, prompt: str, registry: ToolRegistry, verbose: bool = False, audit=None
+    client,
+    config: Config,
+    prompt: str,
+    registry: ToolRegistry,
+    verbose: bool = False,
+    audit=None,
+    progress: Progress | None = None,
 ) -> str:
+    progress = progress or Progress(
+        enabled=verbose, verbose=verbose, limit=config.limits.max_output_bytes
+    )
     messages = [
         {
             "role": "system",
@@ -24,6 +34,7 @@ def run_agent(
     ]
     calls_used = 0
     for turn in range(config.limits.max_turns):
+        progress.turn(turn + 1, config.limits.max_turns)
         request = {
             "model": config.provider.model,
             "messages": messages,
@@ -51,15 +62,13 @@ def run_agent(
             raise AgentError("Provider returned no choices")
         choice = response.choices[0]
         message = choice.message
-        if verbose:
-            usage = response.usage
-            tokens = f", tokens={usage.total_tokens}" if usage else ""
-            print(f"Turn {turn + 1}/{config.limits.max_turns}{tokens}", file=sys.stderr)
+        progress.usage(response.usage)
         if choice.finish_reason not in {"stop", "tool_calls"}:
             raise AgentError(f"Provider stopped before completion ({choice.finish_reason})")
         if not message.tool_calls:
             if not message.content:
                 raise AgentError("Provider returned an empty response")
+            progress.model_finished(turn + 1, calls_used)
             return message.content
         # Refuse the entire batch before doing any work if it exceeds the budget.
         if calls_used + len(message.tool_calls) > config.limits.max_tool_calls:
@@ -69,11 +78,15 @@ def run_agent(
         ids = [call.id for call in message.tool_calls]
         if any(not call_id for call_id in ids) or len(ids) != len(set(ids)):
             raise AgentError("Provider returned missing or duplicate tool-call IDs")
+        progress.update(message.content, len(message.tool_calls))
         messages.append(message.model_dump(exclude_none=True))
         for call in message.tool_calls:
-            if verbose:
-                # Names come from the model; repr keeps terminal control codes inert.
-                print(f"Tool: {call.function.name!r}", file=sys.stderr)
+            progress.tool(
+                calls_used + 1,
+                config.limits.max_tool_calls,
+                call.function.name,
+                call.function.arguments,
+            )
             if audit:
                 audit.record(
                     "tool_requested",
@@ -81,9 +94,11 @@ def run_agent(
                     name=call.function.name,
                     arguments=call.function.arguments,
                 )
+            started = time.monotonic()
             result = registry.dispatch(call.function.name, call.function.arguments)
             if audit:
                 audit.record("tool_result", call_id=call.id, content=result)
+            progress.result(result, time.monotonic() - started)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
             calls_used += 1
     raise AgentError("Turn limit reached; task incomplete")

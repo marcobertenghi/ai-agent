@@ -12,14 +12,12 @@ from openai import APIError, OpenAI
 from aiagent.agent import AgentError, run_agent
 from aiagent.audit import AuditError, AuditRun, replay
 from aiagent.config import ConfigError, load_config, validate_write_root
+from aiagent.display import Progress, terminal_text
 from aiagent.sandbox import CleanupError
 from aiagent.tools import ToolRegistry
 from aiagent.workspace import PolicyError
 
-
-def _terminal_text(text: str) -> str:
-    # Tool/provider text must not execute ANSI terminal control sequences.
-    return "".join(c if c in "\n\t" or c.isprintable() else "?" for c in text)
+_terminal_text = terminal_text  # Also used by replay and existing library callers.
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,8 +28,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--config", type=Path, default=Path("config.toml"), help="Trusted TOML policy"
     )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Print turns, token usage, and tool names"
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "-v", "--verbose", action="store_true", help="Expand tool arguments and result previews"
+    )
+    output.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Hide progress; write only the final answer to stdout",
     )
     parser.add_argument(
         "--check", action="store_true", help="Validate policy offline; no API key required"
@@ -79,22 +84,39 @@ def main(argv: list[str] | None = None) -> int:
             check_available()
         config.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
         audit = AuditRun(config, registry.workspace, args.prompt)
-        print(f"Audit: {audit.path}", file=sys.stderr)
+        progress = Progress(
+            enabled=not args.quiet, verbose=args.verbose, limit=config.limits.max_output_bytes
+        )
+        progress.start(config, audit.path, args.prompt)
         with audit:
-            registry.record = audit.record
+
+            def record(kind, **data):
+                audit.record(kind, **data)  # Durable evidence always comes first.
+                progress.event(kind, **data)
+
+            registry.record = record
             if "run_command" in config.allowed_tools and config.execution.backend == "native":
                 from aiagent.native import probe
 
-                probe(registry.workspace, config.execution, record=audit.record)
+                probe(registry.workspace, config.execution, record=record)
             with OpenAI(
                 base_url=config.provider.base_url,
                 api_key=api_key,
                 timeout=config.provider.timeout_seconds,
                 max_retries=0,
             ) as client:
-                answer = run_agent(client, config, args.prompt, registry, args.verbose, audit=audit)
+                answer = run_agent(
+                    client,
+                    config,
+                    args.prompt,
+                    registry,
+                    args.verbose,
+                    audit=audit,
+                    progress=progress,
+                )
             audit.answer(answer)
-        print(_terminal_text(answer))
+        progress.completed()
+        print(_terminal_text(answer), flush=True)
         return 0
     except APIError:
         # Provider exception bodies can include credentials or prompt fragments.

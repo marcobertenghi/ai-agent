@@ -29,8 +29,8 @@ uv run ctf-agent "Write solve.py to decode SGVsbG8=, run it, and report the resu
 ```
 
 The CLI creates `workspace/` for task files and `runs/<timestamp-id>/` for its
-audit record. The final answer goes to stdout; the audit path and optional
-`--verbose` progress go to stderr. `uv run main.py "your task"` also works.
+audit record. Organized progress is displayed by default on stderr; the final
+answer goes to stdout. `uv run main.py "your task"` also works.
 
 The default command uses the Python interpreter running the CLI. Networking is
 disabled and commands cannot write workspace files by default. For a downloaded
@@ -47,6 +47,52 @@ covers the VPN, local curl/Nmap tools, connectivity checks, configuration, a fir
 scoped run, and common failures. Changing only the prompt does not enable the
 network or install tools. A real sandbox startup probe runs before the first
 model request; missing or unusable isolation stops the run with no host fallback.
+
+## Follow a run
+
+The console shows setup/sandbox checks, each model turn, token usage when
+available, public agent updates, numbered tool calls, arguments, results, command
+exit codes, timings, and the final run summary. A typical tool step looks like:
+
+```text
+Turn 1/20
+  Requesting model response...
+    Agent update:
+      I'll inspect the challenge files before choosing a solver.
+  Tool 1/40: 'get_files_info'
+    Arguments:
+      {
+        "directory": "."
+      }
+    Tool returned in 0.01s
+    Result:
+      'challenge.txt': file, 42 bytes
+```
+
+Agent updates are concise, user-facing plans and conclusions supplied by the
+model. Hidden provider reasoning is not displayed. If a response contains only
+tool calls, the console reports the requested actions without inventing thoughts.
+
+```sh
+# Default: organized progress with compact previews.
+uv run ctf-agent "Analyze challenge.txt and save a solver."
+
+# Expanded argument/result previews, including generated file contents.
+uv run ctf-agent --verbose "Analyze challenge.txt and save a solver."
+
+# Successful runs print only the final answer; errors still go to stderr.
+uv run ctf-agent --quiet "Analyze challenge.txt and save a solver."
+```
+
+`--verbose` and `--quiet` are mutually exclusive. Console previews are bounded
+to keep scripts and long outputs readable; truncation is marked. The audit
+bundle retains the recorded arguments/results subject to the existing audit
+and tool-output limits. Even in quiet mode, audit recording and sandbox checks
+remain enabled. Progress on stderr does not pollute redirected final answers:
+
+```sh
+uv run ctf-agent "Summarize challenge.txt" > answer.txt
+```
 
 ## Review what happened
 
@@ -187,7 +233,8 @@ limits, background-process cleanup, and the consequences of enabling outbound
 networking. Use Docker or a disposable VM for stronger resource containment.
 
 The code is split by responsibility: `cli.py`, `agent.py`, `config.py`, `tools.py`,
-`workspace.py`, `native.py`, `docker_sandbox.py`, `process.py`, and `audit.py`.
+`workspace.py`, `native.py`, `docker_sandbox.py`, `process.py`, `audit.py`, and
+`display.py` for the console view.
 `sandbox.py` selects the backend. The original `calculator/` remains
 an optional local example.
 
