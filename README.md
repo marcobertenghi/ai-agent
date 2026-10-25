@@ -101,6 +101,50 @@ or check connectivity. The normal CLI run probes native isolation before contact
 Exit codes: 0 for a final model answer, 1 for failure/exhausted limits, 130 for
 Ctrl-C. A successful exit is not proof that a challenge was solved.
 
+## Write permissions
+
+**Security warning:** broad write permissions can enable persistence, sandbox
+escape, or privilege escalation when another program later loads modified files.
+Keep write access limited to task data:
+
+| Location | Write policy |
+| --- | --- |
+| `$PATH`/executable directories, such as `/usr/local/bin` | Never use as a workspace or write allowance |
+| Host shell startup files, such as `~/.bashrc`, `~/.zshrc`, or a `ZDOTDIR`/`BASH_ENV` hook | Never grant writes |
+| System directories, such as `/etc` | Never grant writes |
+| Dedicated project task directory, such as `workspace/` | File tools may write here when `write_file` is allowlisted |
+| Build outputs, such as `workspace/build/` | Stay inside the dedicated workspace |
+| Private per-command temporary directory | Writable scratch, removed after execution |
+
+Commands see the workspace **read-only by default**. Enable
+`execution.writable = true` only when a command needs to create task/build files;
+this also requires `write_file` in `tools.allow`. `execution.read_paths` grants
+reads only and never authorizes writes to installed tools or libraries.
+
+The CLI rejects workspace/audit locations that overlap system directories,
+executable paths, the active Python runtime, or known host shell startup paths.
+Symlinks, inode aliases, and conservatively folded case/Unicode paths are checked,
+including directories that do not exist yet. Keep configuration, credentials,
+agent code, and any other auto-loaded application files outside the workspace.
+These checks cover common dangerous locations, not every application's possible
+autoload mechanism.
+
+Use a **private subdirectory** under the OS temporary location (`/tmp/...` on
+Linux, or the OS-selected temporary location on macOS). Do not grant the whole
+shared `/tmp` directory. The native runner already creates and validates its own
+private scratch directory; no general write-path configuration is needed.
+Allowed output is still untrusted: review it before executing it outside the sandbox.
+
+The two write-boundary tests use temporary, parent-writable canaries representing
+host executable directories, shell profiles, and system configuration. They
+verify those writes remain blocked even with workspace writes enabled, then
+verify workspace/build/private-temp writes succeed and scratch is cleaned up.
+They never modify your real profiles, installed tools, or `/etc` files:
+
+```sh
+CTF_AGENT_NATIVE_TESTS=1 uv run --locked python -m unittest tests.test_write_policy.NativeWritePermissionTests -v
+```
+
 ## Extend it
 
 To add a command, install the binary locally and add its absolute executable to

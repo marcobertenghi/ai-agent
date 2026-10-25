@@ -1,7 +1,11 @@
 """Load trusted operator configuration. Model output never changes this policy."""
 
+import os
 import re
+import sys
+import tempfile
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -10,8 +14,13 @@ TOOL_NAMES = {"get_files_info", "get_file_content", "write_file", "run_command"}
 
 
 def path_within(path: Path, directory: Path) -> bool:
-    """Containment including case/firmlink aliases on existing filesystems."""
-    if path.is_relative_to(directory):
+    """Conservative containment, including future case/Unicode and inode aliases."""
+    # Fold even nonexistent tails: on macOS a future PATH directory and a new
+    # workspace can name the same location without either inode existing yet.
+    # On case-sensitive filesystems this intentionally errs toward denying a grant.
+    parts = tuple(unicodedata.normalize("NFC", p).casefold() for p in path.parts)
+    root = tuple(unicodedata.normalize("NFC", p).casefold() for p in directory.parts)
+    if parts[: len(root)] == root:
         return True
     if not directory.exists():
         return False
@@ -20,6 +29,84 @@ def path_within(path: Path, directory: Path) -> bool:
 
 class ConfigError(ValueError):
     """An invalid or unsafe operator configuration."""
+
+
+def validate_write_root(workspace: Path, label: str = "workspace"):
+    """A workspace grants file-tool writes even when commands are read-only.
+
+    Reject persistent execution/configuration locations before creating files or
+    starting a model. Resolve symlinks and compare inode aliases as well as paths.
+    These checks prevent common unsafe configurations; arbitrary application
+    hooks/auto-loaded files still belong outside the task workspace.
+    """
+    workspace = workspace.resolve()
+    system = (
+        "/etc",
+        "/private/etc",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/System",
+        "/Library",
+        "/Applications",
+        "/boot",
+        "/dev",
+        "/proc",
+        "/sys",
+        "/run",
+        "/var/run",
+        "/private/var/run",
+        "/var/lib",
+        "/var/db",
+        "/var/log",
+        "/private/var/db",
+        "/private/var/log",
+        "/opt/homebrew",
+        "/opt/local",
+        "/nix/store",
+    )
+    executable_dirs = [Path(value or os.curdir).resolve() for value in os.get_exec_path()]
+    executable_dirs += [Path("/usr/local/bin"), Path("/usr/local/sbin")]
+    runtime_dirs = [Path(sys.prefix), Path(sys.base_prefix)]
+    for category, roots in (
+        ("system directory", map(Path, system)),
+        ("PATH/executable directory", executable_dirs),
+        ("Python runtime", runtime_dirs),
+    ):
+        for root in roots:
+            root = root.resolve()
+            if path_within(workspace, root) or path_within(root, workspace):
+                raise ConfigError(f"Unsafe {label}: overlaps a {category}")
+
+    home = Path.home().resolve()
+    # Whole home/shared temp directories would expose other applications' files.
+    # A dedicated project or private temporary subdirectory is permitted.
+    for broad_root in (
+        home,
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp").resolve(),
+        Path("/var/tmp").resolve(),
+    ):
+        if path_within(broad_root, workspace):
+            raise ConfigError(
+                f"Unsafe {label}: use a dedicated subdirectory, not a home/shared temp root"
+            )
+
+    zsh = Path(os.path.expandvars(os.environ.get("ZDOTDIR", str(home)))).expanduser().resolve()
+    startup = [home / name for name in (".bashrc", ".bash_profile", ".bash_login", ".profile")]
+    startup += [zsh / name for name in (".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout")]
+    startup.append(home / ".config/fish")
+    for variable in ("BASH_ENV", "ENV"):
+        value = os.environ.get(variable)
+        if value:
+            # Expand path variables only; never evaluate shell expressions.
+            startup.append(Path(os.path.expandvars(value)).expanduser())
+    for path in startup:
+        path = path.resolve()
+        if path_within(path, workspace) or path_within(workspace, path):
+            raise ConfigError(f"Unsafe {label}: overlaps a host shell startup path")
 
 
 @dataclass(frozen=True)
@@ -124,6 +211,7 @@ def load_config(path: Path) -> Config:
     prompt = (path.parent / _text(agent, "prompt_file")).resolve(strict=True)
     if workspace.exists() and not workspace.is_dir():
         raise ConfigError("workspace must be a directory")
+    validate_write_root(workspace)
     # The model must not be able to rewrite the policy, prompt, or API credentials.
     for protected in (path, prompt, path.parent / ".env", Path(__file__).resolve()):
         protected = protected.resolve()
@@ -141,6 +229,7 @@ def load_config(path: Path) -> Config:
 
     audit = _table(data, "audit", {"directory", "max_snapshot_bytes", "max_log_bytes"})
     audit_dir = (path.parent / _text(audit, "directory")).resolve()
+    validate_write_root(audit_dir, label="audit directory")
     # Logs contain privileged configuration and must never be exposed by a mount.
     if audit_dir.is_relative_to(workspace) or workspace.is_relative_to(audit_dir):
         raise ConfigError("Audit directory and workspace must be separate, non-nested directories")

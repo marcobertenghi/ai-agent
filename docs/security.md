@@ -6,6 +6,25 @@ and named command recipes are default-deny allowlists, enforced on every dispatc
 Configuration, credentials, system prompts, code and audit records live outside
 the dedicated workspace. Native execution requires a non-root account.
 
+## Safe write roots
+
+The workspace is a write authority for `write_file` even when commands are
+read-only. Startup therefore rejects workspaces and audit directories overlapping
+system/executable directories, host `$PATH` entries, the active Python runtime,
+or known shell startup paths. Shell checks include bash/profile files, zsh files
+under `ZDOTDIR`, fish configuration, and `BASH_ENV`/`ENV` hooks. Symlinks and
+filesystem case aliases are resolved. A whole home or shared temporary root is
+also rejected. Native scratch roots receive the same validation before launching
+untrusted code.
+
+Use a dedicated task directory and build outputs inside it. Temporary writes go
+to a private per-command directory, not a blanket grant to shared `/tmp`.
+Application-specific autoload paths and hooks are not universally discoverable;
+the operator must keep those and other trusted executables outside task data.
+See [the README write-permission table](../README.md#write-permissions) and
+`tests/test_write_policy.py` for the two real write-boundary tests. Their unsafe
+targets are user-writable test canaries, never real host profiles/system files.
+
 ## Host file tools
 
 File tools accept relative workspace paths and reject `..`, absolute paths, NULs

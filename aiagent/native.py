@@ -16,7 +16,7 @@ import tomllib
 from dataclasses import replace
 from pathlib import Path
 
-from aiagent.config import Execution, path_within
+from aiagent.config import Execution, path_within, validate_write_root
 from aiagent.process import capture
 from aiagent.workspace import PolicyError, Workspace
 
@@ -224,6 +224,7 @@ def run_native(
     launcher = [sys.executable, "-I", "-S", str(helper), json.dumps(limits), *argv]
     with tempfile.TemporaryDirectory(prefix="ctf-agent-") as directory:
         scratch = Path(directory).resolve()
+        validate_write_root(scratch, label="scratch directory")
         env = {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(scratch),

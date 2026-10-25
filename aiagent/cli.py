@@ -11,7 +11,7 @@ from openai import APIError, OpenAI
 
 from aiagent.agent import AgentError, run_agent
 from aiagent.audit import AuditError, AuditRun, replay
-from aiagent.config import ConfigError, load_config
+from aiagent.config import ConfigError, load_config, validate_write_root
 from aiagent.sandbox import CleanupError
 from aiagent.tools import ToolRegistry
 from aiagent.workspace import PolicyError
@@ -64,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Audit directory: {config.audit.directory}")
             return 0
         load_dotenv(config.path.parent / ".env", override=False)
+        # .env may supply PATH or shell startup variables that were absent when
+        # the policy was loaded. Recheck before any workspace/audit writes.
+        validate_write_root(config.workspace)
+        validate_write_root(config.audit.directory, label="audit directory")
         api_key = os.environ.get(config.provider.api_key_env)
         if not api_key:
             raise ConfigError(
