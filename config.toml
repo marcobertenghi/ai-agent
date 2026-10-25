@@ -9,6 +9,13 @@ model = "openrouter/free"
 api_key_env = "OPENROUTER_API_KEY"
 timeout_seconds = 60
 
+[audit]
+# Mandatory local record, outside the agent workspace. No API keys are collected.
+directory = "runs"
+# Each before/after snapshot is bounded; exceeding a limit stops the run.
+max_snapshot_bytes = 10000000
+max_log_bytes = 20000000
+
 [limits]
 max_turns = 20
 max_tool_calls = 40

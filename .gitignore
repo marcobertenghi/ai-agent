@@ -16,6 +16,9 @@ wheels/
 
 # Agent task files (may contain challenge material or generated payloads)
 workspace/
+runs/
+captures/
+config.local*.toml
 
 # Tool caches
 .ruff_cache/

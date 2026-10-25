@@ -1,5 +1,5 @@
-# Small default tool image; add classroom tools here, then rebuild explicitly.
-# Instructors can pin this base image by digest for reproducible classes.
+# Small default image. Add tools here and rebuild explicitly.
+# Pin the base image by digest when you need a reproducible environment.
 FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /workspace
