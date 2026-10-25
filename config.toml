@@ -1,0 +1,42 @@
+# Trusted operator policy. Paths are relative to THIS file, not your shell's cwd.
+[agent]
+workspace = "workspace"
+prompt_file = "system_prompt.md"
+
+[provider]
+base_url = "https://openrouter.ai/api/v1"
+model = "openrouter/free"
+api_key_env = "OPENROUTER_API_KEY"
+timeout_seconds = 60
+
+[limits]
+max_turns = 20
+max_tool_calls = 40
+max_output_tokens = 2048
+max_file_bytes = 100000
+max_output_bytes = 16000
+max_directory_entries = 200
+
+[tools]
+# Default deny: an omitted tool is neither advertised nor dispatched.
+allow = ["get_files_info", "get_file_content", "write_file", "run_command"]
+# Match paths, ancestors, or single components (case-insensitive Unicode globs).
+# Commands refuse to mount a workspace containing any denied paths.
+deny_paths = [".env", ".env.*", ".git", ".ssh", "*.pem", "*.key"]
+
+[execution]
+# Build once: docker build -t ctf-agent:local sandbox
+# Commands never pull images and never fall back to host execution.
+image = "ctf-agent:local"
+network = "none"   # 'bridge' explicitly enables outbound access; no target filtering.
+writable = false   # Commands see the workspace read-only. write_file still works.
+timeout_seconds = 30
+memory_mb = 256
+cpus = 1
+pids = 64
+
+# Names map to fixed argv prefixes INSIDE the container. No host shell is used.
+# Extra model-supplied arguments are appended. Python can execute arbitrary code.
+[execution.commands]
+# Ignore Python environment/user-site settings while retaining local imports.
+python = ["/usr/local/bin/python", "-E", "-s", "-B"]
