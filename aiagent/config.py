@@ -44,6 +44,13 @@ class Execution:
 
 
 @dataclass(frozen=True)
+class Audit:
+    directory: Path
+    max_snapshot_bytes: int
+    max_log_bytes: int
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     workspace: Path
@@ -53,6 +60,7 @@ class Config:
     allowed_tools: tuple[str, ...]
     denied_paths: tuple[str, ...]
     execution: Execution
+    audit: Audit
 
 
 def _table(parent: dict, name: str, keys: set[str]) -> dict:
@@ -95,7 +103,7 @@ def load_config(path: Path) -> Config:
     path = path.resolve(strict=True)
     with path.open("rb") as handle:
         data = tomllib.load(handle)
-    unknown = data.keys() - {"agent", "provider", "limits", "tools", "execution"}
+    unknown = data.keys() - {"agent", "provider", "limits", "tools", "execution", "audit"}
     if unknown:
         raise ConfigError(f"Unknown configuration tables: {', '.join(sorted(unknown))}")
 
@@ -118,6 +126,20 @@ def load_config(path: Path) -> Config:
             )
     if not prompt.is_file():
         raise ConfigError("prompt_file must be a regular text file")
+
+    audit = _table(data, "audit", {"directory", "max_snapshot_bytes", "max_log_bytes"})
+    audit_dir = (path.parent / _text(audit, "directory")).resolve()
+    # Logs contain privileged configuration and must never be exposed by a mount.
+    if audit_dir.is_relative_to(workspace) or workspace.is_relative_to(audit_dir):
+        raise ConfigError("Audit directory and workspace must be separate, non-nested directories")
+    if audit_dir.exists() and workspace.exists():
+        if audit_dir.samefile(workspace) or any(workspace.samefile(p) for p in audit_dir.parents):
+            raise ConfigError("Audit directory must be outside the workspace")
+    audit_obj = Audit(
+        audit_dir,
+        _integer(audit, "max_snapshot_bytes", 1, 100_000_000),
+        _integer(audit, "max_log_bytes", 4096, 100_000_000),
+    )
 
     provider = _table(data, "provider", {"base_url", "model", "api_key_env", "timeout_seconds"})
     url = _text(provider, "base_url")
@@ -213,4 +235,5 @@ def load_config(path: Path) -> Config:
             _integer(execution, "pids", 8, 256),
             recipes,
         ),
+        audit_obj,
     )

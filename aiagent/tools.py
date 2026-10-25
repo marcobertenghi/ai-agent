@@ -33,6 +33,7 @@ def _invalid_constant(value):
 class ToolRegistry:
     def __init__(self, config: Config):
         self.config = config
+        self.record = None
         self.workspace = Workspace(
             config.workspace,
             config.denied_paths,
@@ -85,6 +86,7 @@ class ToolRegistry:
             self.config.limits.max_output_bytes,
             command,
             args or [],
+            record=self.record,
         )
 
     def schemas(self) -> list[dict]:

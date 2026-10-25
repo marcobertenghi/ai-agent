@@ -5,6 +5,7 @@ directory with O_NOFOLLOW and resolve the next component relative to that fd.
 This module intentionally supports POSIX hosts (Linux/macOS), not Windows.
 """
 
+import hashlib
 import os
 import stat
 import unicodedata
@@ -160,3 +161,60 @@ class Workspace:
                         pending.append((*parts, entry.name))
                     elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         raise PolicyError("Command workspace contains a link or special file")
+
+    def snapshot(self, destination: Path, max_bytes: int) -> dict:
+        """Copy permitted regular files for auditing, using the same fd boundary.
+
+        Denied files, links, mounts and special files are recorded as skipped;
+        their contents are never archived. Limits fail rather than silently
+        producing a snapshot that looks complete. The destination is trusted.
+        """
+        destination.mkdir(mode=0o700)
+        files, skipped, directories = {}, {}, []
+        pending = [()]
+        total = count = 0
+        device = self.root.stat().st_dev
+        while pending:
+            parts = pending.pop()
+            with self._directory(parts) as fd, os.scandir(fd) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > 10_000:
+                        raise PolicyError("Audit snapshot exceeds 10,000 entries")
+                    relative = "/".join((*parts, entry.name))
+                    info = entry.stat(follow_symlinks=False)
+                    if self.denied_path(relative):
+                        skipped[relative] = "denied"
+                    elif info.st_dev != device:
+                        skipped[relative] = "different filesystem"
+                    elif stat.S_ISDIR(info.st_mode):
+                        (destination / relative).mkdir(mode=0o700)
+                        directories.append(relative)
+                        pending.append((*parts, entry.name))
+                    elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        skipped[relative] = "link or special file"
+                    else:
+                        source_fd = os.open(
+                            entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd
+                        )
+                        with os.fdopen(source_fd, "rb") as source:
+                            self._regular(source.fileno())
+                            data = source.read(max_bytes - total + 1)
+                        total += len(data)
+                        if total > max_bytes:
+                            raise PolicyError("Audit snapshot exceeds audit.max_snapshot_bytes")
+                        target = destination / relative
+                        target.write_bytes(data)
+                        # Retain executable bits, without setuid/setgid/sticky bits.
+                        target.chmod(stat.S_IMODE(info.st_mode) & 0o777)
+                        files[relative] = {
+                            "bytes": len(data),
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                            "mode": stat.S_IMODE(info.st_mode) & 0o777,
+                        }
+        return {
+            "files": files,
+            "directories": sorted(directories),
+            "skipped": skipped,
+            "total_bytes": total,
+        }

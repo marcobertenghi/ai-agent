@@ -105,7 +105,12 @@ def _capture(argv: list[str], timeout: int, limit: int) -> tuple[int, bytes, str
 
 
 def run_command(
-    workspace: Workspace, policy: Execution, output_limit: int, command: str, args: list[str]
+    workspace: Workspace,
+    policy: Execution,
+    output_limit: int,
+    command: str,
+    args: list[str],
+    record=None,
 ) -> str:
     if command not in policy.commands:
         raise PolicyError("Command is not allowlisted")
@@ -146,10 +151,42 @@ def run_command(
             raise PolicyError(
                 "Docker could not create the sandbox. Check daemon and locally built image"
             )
+        if record:
+            # Inspect the CREATED container so mutable image tags cannot make
+            # the audit refer to an image different from the one actually used.
+            try:
+                inspected = subprocess.run(
+                    [docker, "inspect", "--format", "{{.Image}}", name],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise PolicyError(
+                    "Sandbox image inspection timed out; command not started"
+                ) from error
+            image_id = inspected.stdout.decode("ascii", errors="replace").strip()
+            if inspected.returncode or not image_id.startswith("sha256:"):
+                raise PolicyError("Cannot record sandbox image identity; command not started")
+            record(
+                "command_started",
+                container=name,
+                image_id=image_id,
+                docker_argv=argv,
+                argv=[*policy.commands[command], *args],
+                network=policy.network,
+                writable=policy.writable,
+            )
         code, output, reason = _capture(
             [docker, "start", "--attach", name], policy.timeout_seconds, output_limit
         )
         text = output.decode("utf-8", errors="replace")
+        if record:
+            record(
+                "command_finished", container=name, exit_code=code, output=text, stop_reason=reason
+            )
         status = f"Exit code: {code}" + (f"\n[{reason}]" if reason else "")
         return f"{status}\n{text or '[No output]'}"
     finally:
@@ -169,3 +206,5 @@ def run_command(
                 raise CleanupError(
                     f"Sandbox cleanup failed. Agent stopped; remove container with: docker rm -f {name}"
                 ) from error
+            if record:
+                record("container_removed", container=name)

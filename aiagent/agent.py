@@ -11,10 +11,15 @@ class AgentError(RuntimeError):
 
 
 def run_agent(
-    client, config: Config, prompt: str, registry: ToolRegistry, verbose: bool = False
+    client, config: Config, prompt: str, registry: ToolRegistry, verbose: bool = False, audit=None
 ) -> str:
     messages = [
-        {"role": "system", "content": config.prompt_path.read_text(encoding="utf-8")},
+        {
+            "role": "system",
+            "content": audit.system_prompt
+            if audit
+            else config.prompt_path.read_text(encoding="utf-8"),
+        },
         {"role": "user", "content": prompt},
     ]
     calls_used = 0
@@ -27,7 +32,21 @@ def run_agent(
         schemas = registry.schemas()
         if schemas:
             request["tools"] = schemas
+        if audit:
+            # Earlier events contain the conversation; don't duplicate its full
+            # growing history on every request. Keep exact per-request options.
+            audit.record(
+                "model_request",
+                turn=turn + 1,
+                options={key: value for key, value in request.items() if key != "messages"},
+            )
         response = client.chat.completions.create(**request)
+        if audit:
+            audit.record(
+                "model_response",
+                turn=turn + 1,
+                response=response.model_dump(mode="json", exclude_none=True),
+            )
         if not response.choices:
             raise AgentError("Provider returned no choices")
         choice = response.choices[0]
@@ -55,7 +74,16 @@ def run_agent(
             if verbose:
                 # Names come from the model; repr keeps terminal control codes inert.
                 print(f"Tool: {call.function.name!r}", file=sys.stderr)
+            if audit:
+                audit.record(
+                    "tool_requested",
+                    call_id=call.id,
+                    name=call.function.name,
+                    arguments=call.function.arguments,
+                )
             result = registry.dispatch(call.function.name, call.function.arguments)
+            if audit:
+                audit.record("tool_result", call_id=call.id, content=result)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
             calls_used += 1
     raise AgentError("Turn limit reached; task incomplete")

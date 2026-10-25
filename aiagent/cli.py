@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from openai import APIError, OpenAI
 
 from aiagent.agent import AgentError, run_agent
+from aiagent.audit import AuditError, AuditRun, replay
 from aiagent.config import ConfigError, load_config
 from aiagent.sandbox import CleanupError
 from aiagent.tools import ToolRegistry
@@ -35,10 +36,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check", action="store_true", help="Validate policy offline; no API key required"
     )
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        metavar="RUN_DIRECTORY",
+        help="View a saved audit transcript offline; never executes tools",
+    )
     args = parser.parse_args(argv)
-    if not args.check and (not args.prompt or not args.prompt.strip()):
+    if args.replay and (args.prompt or args.check):
+        parser.error("--replay cannot be combined with a prompt or --check")
+    if not args.check and not args.replay and (not args.prompt or not args.prompt.strip()):
         parser.error("a nonempty prompt is required unless using --check")
+    audit = None
     try:
+        if args.replay:
+            return replay(args.replay, lambda text: print(_terminal_text(text)))
         config = load_config(args.config)
         registry = ToolRegistry(config)
         if args.check:
@@ -48,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Command network: {config.execution.network}; writable: {config.execution.writable}"
             )
             print("Docker availability and image isolation are not checked by --check.")
+            print(f"Audit directory: {config.audit.directory}")
             return 0
         load_dotenv(config.path.parent / ".env", override=False)
         api_key = os.environ.get(config.provider.api_key_env)
@@ -56,13 +69,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"Set {config.provider.api_key_env} in the environment or .env next to the config"
             )
         config.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with OpenAI(
-            base_url=config.provider.base_url,
-            api_key=api_key,
-            timeout=config.provider.timeout_seconds,
-            max_retries=0,
-        ) as client:
-            answer = run_agent(client, config, args.prompt, registry, args.verbose)
+        audit = AuditRun(config, registry.workspace, args.prompt)
+        print(f"Audit: {audit.path}", file=sys.stderr)
+        with audit:
+            registry.record = audit.record
+            with OpenAI(
+                base_url=config.provider.base_url,
+                api_key=api_key,
+                timeout=config.provider.timeout_seconds,
+                max_retries=0,
+            ) as client:
+                answer = run_agent(client, config, args.prompt, registry, args.verbose, audit=audit)
+            audit.answer(answer)
         print(_terminal_text(answer))
         return 0
     except APIError:
@@ -72,17 +90,28 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    except (ConfigError, PolicyError, AgentError, CleanupError, tomllib.TOMLDecodeError) as error:
+    except (
+        ConfigError,
+        PolicyError,
+        AgentError,
+        CleanupError,
+        AuditError,
+        tomllib.TOMLDecodeError,
+    ) as error:
         print(f"Error: {_terminal_text(str(error))}", file=sys.stderr)
         return 1
     except (OSError, UnicodeError):
         print(
-            "Error: Could not access a required config, prompt, or workspace file.", file=sys.stderr
+            "Error: Could not access a required config, prompt, workspace, or audit file.",
+            file=sys.stderr,
         )
         return 1
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
         return 130
+    finally:
+        if audit is not None and audit.finalization_error:
+            print(f"Warning: {_terminal_text(audit.finalization_error)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
