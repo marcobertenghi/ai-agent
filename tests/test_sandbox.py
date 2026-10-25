@@ -15,11 +15,16 @@ class SandboxTests(ProjectTest):
         super().setUp()
         self.ws = Workspace(self.config.workspace, self.config.denied_paths, 1000, 100)
         self.policy = self.config.execution
+        self.policy = replace(
+            self.policy,
+            backend="docker",
+            commands={"python": ("/usr/local/bin/python", "-E", "-s", "-B")},
+        )
 
     def test_missing_docker_has_no_host_fallback(self):
         with (
-            patch("aiagent.sandbox.shutil.which", return_value=None),
-            patch("aiagent.sandbox.subprocess.run") as run,
+            patch("aiagent.docker_sandbox.shutil.which", return_value=None),
+            patch("aiagent.docker_sandbox.subprocess.run") as run,
         ):
             with self.assertRaisesRegex(PolicyError, "Docker is required"):
                 run_command(self.ws, self.policy, 1000, "python", ["-c", "print(42)"])
@@ -28,9 +33,9 @@ class SandboxTests(ProjectTest):
     def test_container_flags_and_argument_separation(self):
         created = subprocess.CompletedProcess([], 0, b"container-id")
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
-            patch("aiagent.sandbox.subprocess.run", return_value=created) as run,
-            patch("aiagent.sandbox._capture", return_value=(0, b"42", "")),
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch("aiagent.docker_sandbox.subprocess.run", return_value=created) as run,
+            patch("aiagent.docker_sandbox._capture", return_value=(0, b"42", "")),
         ):
             result = run_command(
                 self.ws, self.policy, 1000, "python", ["--privileged", "$(touch /bad)"]
@@ -57,8 +62,8 @@ class SandboxTests(ProjectTest):
     def test_workspace_preflight_happens_before_container_create(self):
         (self.config.workspace / ".env").write_text("secret")
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
-            patch("aiagent.sandbox.subprocess.run") as run,
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch("aiagent.docker_sandbox.subprocess.run") as run,
         ):
             with self.assertRaises(PolicyError):
                 run_command(self.ws, self.policy, 1000, "python", [])
@@ -68,26 +73,26 @@ class SandboxTests(ProjectTest):
         ok = subprocess.CompletedProcess([], 0, b"id")
         failed = subprocess.CompletedProcess([], 1)
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
-            patch("aiagent.sandbox.subprocess.run", side_effect=[ok, ok]) as run,
-            patch("aiagent.sandbox._capture", side_effect=KeyboardInterrupt),
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch("aiagent.docker_sandbox.subprocess.run", side_effect=[ok, ok]) as run,
+            patch("aiagent.docker_sandbox._capture", side_effect=KeyboardInterrupt),
         ):
             with self.assertRaises(KeyboardInterrupt):
                 run_command(self.ws, self.policy, 1000, "python", [])
             self.assertEqual(run.call_count, 2)
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
-            patch("aiagent.sandbox.subprocess.run", side_effect=[ok, failed]),
-            patch("aiagent.sandbox._capture", return_value=(0, b"", "")),
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch("aiagent.docker_sandbox.subprocess.run", side_effect=[ok, failed]),
+            patch("aiagent.docker_sandbox._capture", return_value=(0, b"", "")),
         ):
             with self.assertRaises(CleanupError):
                 run_command(self.ws, self.policy, 1000, "python", [])
 
     def test_create_timeout_attempts_cleanup(self):
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
             patch(
-                "aiagent.sandbox.subprocess.run",
+                "aiagent.docker_sandbox.subprocess.run",
                 side_effect=[
                     subprocess.TimeoutExpired("docker create", 15),
                     subprocess.CompletedProcess([], 0),
@@ -122,6 +127,17 @@ class SandboxTests(ProjectTest):
 )
 class DockerIntegrationTests(ProjectTest):
     """Opt-in checks of the real runtime, not a substitute for kernel isolation."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = replace(
+            self.config,
+            execution=replace(
+                self.config.execution,
+                backend="docker",
+                commands={"python": ("/usr/local/bin/python", "-E", "-s", "-B")},
+            ),
+        )
 
     def test_real_container_confinement(self):
         ws = Workspace(self.config.workspace, self.config.denied_paths, 10000, 100)
@@ -170,7 +186,7 @@ print('isolation checks passed')
             names.append(name)
             return original(workspace, policy, name)
 
-        with patch("aiagent.sandbox.container_options", side_effect=remember):
+        with patch("aiagent.docker_sandbox.container_options", side_effect=remember):
             result = run_command(
                 ws,
                 replace(self.config.execution, timeout_seconds=1),

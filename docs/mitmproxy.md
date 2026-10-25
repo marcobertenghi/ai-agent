@@ -10,7 +10,28 @@ so it is an optional companion rather than a core dependency.
 SSH sessions, or arbitrary application traffic. No transparent interception is
 configured by this project.
 
-## Explicit proxy on a Linux lab VM
+## Explicit proxy with native execution
+
+With the default native backend, start the proxy on the same machine as the CLI:
+
+```sh
+mkdir -m 700 -p captures
+mitmdump --listen-host 127.0.0.1 --listen-port 8080 -w captures/web.flows
+```
+
+Keep `backend = "native"`, set `network = "outbound"`, and add this recipe,
+using your actual local curl path:
+
+```toml
+curl_proxy = ["/usr/bin/curl", "--connect-timeout", "5", "--max-time", "30", "--proxy", "http://127.0.0.1:8080"]
+```
+
+The native process reaches this loopback listener through the host network.
+For HTTPS, the public certificate setup below applies; use its **absolute host
+workspace path** in `--cacert`, rather than `/workspace/proxy-ca.crt`.
+This remains opt-in capture, not enforced proxy-only egress.
+
+## Explicit proxy from the optional Docker backend
 
 Follow [the TryHackMe network setup](tryhackme.md) first. Install mitmproxy in
 the lab VM using its [official installation instructions](https://docs.mitmproxy.org/stable/overview/installation/).
@@ -35,7 +56,7 @@ The listener is bound to the Docker-facing interface, not all interfaces.
 Restrict it with the VM firewall if other containers can reach that network.
 `127.0.0.1` inside an agent container refers to that container, not this proxy.
 
-Keep `network = "bridge"` and add this recipe to the copied task policy:
+Keep `backend = "docker"`, set `network = "bridge"`, and add this recipe to the copied task policy:
 
 ```toml
 curl_proxy = ["/usr/bin/curl", "--connect-timeout", "5", "--max-time", "30", "--proxy", "http://172.17.0.1:8080"]
@@ -60,7 +81,8 @@ cp "$HOME/.mitmproxy/mitmproxy-ca-cert.pem" workspace/proxy-ca.crt
 This copies the **public certificate only**, renamed `.crt` so it is not blocked
 by the default `*.pem` deny rule. Do not copy `mitmproxy-ca.pem`: it contains the
 CA private key. Add `"--cacert", "/workspace/proxy-ca.crt"` to the `curl_proxy`
-argv prefix before using it with an HTTPS target. Do not disable certificate
+argv prefix for the Docker backend before using it with an HTTPS target. Native
+execution uses the actual absolute host path to that certificate. Do not disable certificate
 validation as a substitute. See [mitmproxy's certificate documentation](https://docs.mitmproxy.org/stable/concepts/certificates/).
 
 ## Preserve and inspect the evidence

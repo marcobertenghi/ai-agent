@@ -82,7 +82,11 @@ class AuditRun:
         """Save only known source files, never a repository-wide copy or .env."""
         package = Path(__file__).resolve().parent
         root = package.parent
-        paths = [(f"aiagent/{p.name}", p) for p in package.glob("*.py")]
+        paths = [
+            (f"aiagent/{p.name}", p)
+            for pattern in ("*.py", "*.toml")
+            for p in package.glob(pattern)
+        ]
         paths += [
             (name, root / name)
             for name in (
@@ -246,7 +250,8 @@ def replay(path: Path, emit) -> int:
         elif kind == "tool_result":
             emit(f"Result {data['call_id']}:\n{data['content']}")
         elif kind == "command_started":
-            emit(f"Container argv ({data['image_id']}): {shlex.join(data['argv'])}")
+            identity = data.get("image_id", data.get("backend", "unknown"))
+            emit(f"Sandbox argv ({identity}): {shlex.join(data['argv'])}")
         elif kind == "model_response":
             choices = data["response"].get("choices", [])
             if choices and choices[0]["message"].get("content"):

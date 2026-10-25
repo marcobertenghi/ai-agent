@@ -50,9 +50,10 @@ class ConfigTests(ProjectTest):
             ),
             ("max_turns = 20", "max_tunrs = 20"),
             ('base_url = "https://openrouter.ai/api/v1"', 'base_url = "http://openrouter.ai"'),
-            ('python = ["/usr/local/bin/python", "-E", "-s", "-B"]', 'python = ["python"]'),
+            ('python = ["python", "-E", "-s", "-B"]', 'python = ["unknown-relative-command"]'),
             ("writable = false", 'writable = "false"'),
-            ('python = ["/usr/local/bin/python", "-E", "-s", "-B"]', ""),
+            ('python = ["python", "-E", "-s", "-B"]', ""),
+            ('backend = "native"', 'backend = "unsandboxed"'),
         ]
         for old, new in cases:
             with self.subTest(new=new):
@@ -96,7 +97,7 @@ class ToolTests(ProjectTest):
         self.assertFalse((self.config.workspace / "x").exists())
 
     def test_unknown_command_and_bad_argv_never_start_processes(self):
-        with patch("aiagent.sandbox.subprocess.run") as run:
+        with patch("aiagent.tools.run_command") as run:
             for args in (
                 {"command": "shell"},
                 {"command": "python", "args": "--version"},

@@ -28,7 +28,7 @@ runs/<timestamp-id>/
   before.json       Initial files' SHA-256 hashes, sizes, modes, skipped entries
   after/            Final permitted workspace files
   after.json        Final snapshot manifest
-  source/           Agent modules, project metadata/lockfile, known Dockerfiles
+  source/           Agent modules/native policy, project metadata/lockfile, Dockerfiles
   summary.json      Status and created/modified/deleted regular files
 ```
 
@@ -43,10 +43,13 @@ The event stream contains:
 - Each dispatched tool request before execution, then the result actually returned
   to the model. Malformed and disallowed requests and their denials are included.
   Calls rejected as an over-budget batch remain visible in the model response.
-- For commands, exact Docker create argv, resolved in-container argv, the image ID
-  of the created container, merged bounded stdout/stderr, exit/stop information,
-  and successful container removal. A missing result/removal event indicates an
-  interrupted or failed action; it is not evidence of completion.
+- For native commands: resolved argv, hashes of the executable, sandbox binary
+  and trusted launcher, runtime read paths, limits and the exact generated
+  Seatbelt profile/bubblewrap invocation. The fixed startup probe is also recorded.
+- For Docker commands: exact create argv, resolved in-container argv, image ID
+  and successful removal. Both backends record merged bounded stdout/stderr
+  and exit/stop information. Missing results indicate an interrupted or failed
+  action, not evidence of completion.
 - Start/end workspace manifests and a completed, failed, or interrupted status.
   Exception *types* are logged; provider exception bodies are deliberately omitted.
 
@@ -84,7 +87,17 @@ Inspect `before.json` for skipped files/directories and recorded file modes.
 Snapshots exclude denied paths, symlinks, special files, multiply linked files,
 and nested filesystems; they do not claim to preserve those objects.
 
-Check the `command_started` events for the exact image IDs. If multiple IDs were
+For **native execution**, use `command_started` events to identify the resolved
+host executable, its SHA-256 hash, runtime read paths and sandbox invocation.
+The bundle records Python/platform versions and includes the native baseline
+policy and helper source. Keep compatible local interpreter/tool installations
+and dependencies; their binaries/libraries are not copied into the bundle.
+Absolute paths, OS behavior and versions can differ on another machine. Review
+and adjust runtime paths in the restored policy. Scratch paths in a recorded
+invocation are temporary; let the runner create fresh ones instead of blindly
+executing a saved launcher command.
+
+For **Docker execution**, check `command_started` events for exact image IDs. If multiple IDs were
 used, reproduce each step with its recorded image. Preserve a relevant image
 before pruning Docker, for example:
 

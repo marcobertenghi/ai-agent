@@ -1,146 +1,149 @@
 # Work on a TryHackMe room
 
-The agent runs on your machine or VM. It does not log into TryHackMe, start room
-machines, download VPN credentials, or automatically know the room's target IP.
-You provide the active target, permitted actions, and relevant room text/files.
+The agent runs on your Mac or Linux machine/VM. You provide the active room IP,
+authorized scope and room text/files. It does not log into TryHackMe, start room
+machines, or download VPN credentials.
 
-## 1. Get the target reachable
+## 1. Connect the host to the room
 
-Start the room's target machine and copy its current IP. Use your own Linux VM
-with Docker and the room's OpenVPN connection for the most direct setup. Keep
-the VPN client on that VM, outside the agent container. Start it manually using
-your downloaded profile, for example:
+Start the target and copy its current IP. Connect the **host running this CLI**
+to TryHackMe with its OpenVPN profile, using your VPN application or, on Linux:
 
 ```sh
 sudo openvpn --config /absolute/path/to/your-profile.ovpn
 ```
 
-Leave that terminal running. TryHackMe's targets are on its private network;
-access is provided through OpenVPN or an already connected AttackBox. See the
+Keep the VPN outside the agent workspace and sandbox. Targets are on TryHackMe's
+private network; the VPN or AttackBox provides access. See the
 [official network guide](https://help.tryhackme.com/en/articles/8991552-networks-explained-vpn-attackbox-and-security-tips)
 and [OpenVPN walkthrough](https://tryhackme.com/room/openvpn).
-An AttackBox is also useful for manual work, but do not assume it provides the
-Docker runtime required by this project. Use the agent there only if that
-environment supports the required Docker setup.
+A dedicated Linux lab VM is useful for separating the lab from personal data;
+native execution itself does not require a VM on macOS. An AttackBox can run
+the agent if it supports the required Python version and bubblewrap/user namespaces.
 
-In another VM terminal, verify a service the room says should be listening:
+In a second terminal, verify a service the room says should be listening:
 
 ```sh
-# Replace this example with the active room machine's actual IP.
+# Replace this example with the active room machine's real IP.
 TARGET_IP=10.10.10.10
 curl --connect-timeout 5 --max-time 10 -I "http://$TARGET_IP/"
 ```
 
-Port 80 is only an example. Use the room's documented port/protocol if different.
-An HTTP error response still establishes connectivity; a timeout does not.
-Do not put your VPN profile or private keys in `workspace/`.
+Port 80 is an example; use the actual service/port. An HTTP error response still
+establishes connectivity. A timeout does not. Do not put `.ovpn`, API keys or
+private keys in `workspace/`.
 
-## 2. Build the optional network image
+## 2. Install local tools
 
-From the project directory, after installing the project and setting `.env` as
-shown in the main README:
+Follow the main README to install the Python project and set `.env`.
+On Debian/Ubuntu:
 
 ```sh
-docker build -t ctf-agent:local sandbox
-docker build -f sandbox/network.Dockerfile -t ctf-agent:network sandbox
+sudo apt-get install bubblewrap curl nmap
 ```
 
-This adds curl, Nmap, and CA certificates. The default image stays Python-only.
-There is no need to install an entire penetration-testing distribution in it.
+On macOS, Seatbelt and `/usr/bin/curl` are built in. If needed, install Nmap
+with `brew install nmap`. Find the tool paths:
 
-## 3. Enable the tools and network explicitly
+```sh
+command -v curl
+command -v nmap
+```
+
+Tools run as a regular user. Use Nmap TCP connect mode (`-sT`) without raw-packet
+privileges. The native runner does not grant sudo/root or packet capabilities.
+
+## 3. Make a task policy
 
 ```sh
 cp config.toml config.local.tryhackme.toml
 ```
 
-Edit this copy, keeping the rest of the configuration. Replace these settings
-in the existing `[execution]` table:
+In the copy's **existing** `[execution]` table, set:
 
 ```toml
-image = "ctf-agent:network"
-network = "bridge"
+backend = "native"
+network = "outbound"
 timeout_seconds = 90
 writable = false
 ```
 
-Add these recipes to the existing `[execution.commands]` table:
+Keep the Python recipe and add these to the existing `[execution.commands]`
+table, using the actual absolute paths reported above. On Linux:
 
 ```toml
 curl = ["/usr/bin/curl", "--connect-timeout", "5", "--max-time", "30"]
 nmap = ["/usr/bin/nmap", "-sT", "-Pn", "-n"]
 ```
 
-[`-sT` uses TCP connect scans](https://nmap.org/book/scan-methods-connect-scan.html),
-which work without raw-packet privileges. No added
-capabilities, privileged container, or host network is needed. Other Nmap modes
-may require permissions the sandbox intentionally does not grant.
+On Apple Silicon Homebrew, Nmap is usually `/opt/homebrew/bin/nmap`. Replace the
+Nmap recipe path accordingly. Its libraries/data also need read access. In the
+existing `[execution]` table, a practical Homebrew runtime allowance is:
 
-`network = "bridge"` permits outbound connections broadly; the IP in a prompt
-is task scope, **not an enforced network allowlist**. If you need enforced scope,
-apply egress rules on the lab VM/network. Keeping Python enabled also permits
-other network clients written in Python. Removing a curl recipe does not stop
-an interpreter from making HTTP requests.
-
-## 4. Verify connectivity from Docker too
-
-Before asking a model to work, check the same service from the network image:
-
-```sh
-docker run --rm --network bridge --cap-drop=ALL --read-only \
-  ctf-agent:network /usr/bin/curl \
-  --connect-timeout 5 --max-time 10 -I "http://$TARGET_IP/"
-uv run ctf-agent --config config.local.tryhackme.toml --check
+```toml
+read_paths = ["/opt/homebrew/Cellar"]
 ```
 
-The image runs as a non-root user. This diagnostic has no host workspace or
-credential mounts. If host curl works but this fails, investigate VPN forwarding,
-firewall/NAT rules and Docker subnet overlap on your VM. Avoid choosing a Docker
-subnet that overlaps a lab/VPN route. Docker Desktop on macOS adds a VM network
-layer, so host VPN reachability may not be available from containers; running
-Docker and OpenVPN together inside a Linux VM is the suggested troubleshooting
-baseline. Do not work around routing by giving the agent host networking or
-mounting the Docker socket/VPN credentials.
+That grants read-only access to installed Homebrew packages. For a tighter policy,
+list just Nmap's version directory and its required dependency/data directories;
+`otool -L /opt/homebrew/bin/nmap` lists its linked libraries. Intel Homebrew or
+other package managers use different paths. Never solve a missing-library error
+by granting read access to your home or the whole project. Some tools may need
+runtime allowances beyond this minimal profile; inspect their failures and add
+only trusted library/data paths, or use the [optional Docker image](docker.md).
 
-## 5. Give it a bounded first task
+Outbound mode uses the host/VPN routes. It permits broad IP networking, including
+local services, and is **not an enforced target allowlist**. Apply lab/network
+firewall rules if scope must be enforced. Python can make requests too, so command
+recipe names are not a network boundary. See [security](security.md).
+
+## 4. Start with a bounded task
 
 ```sh
+uv run ctf-agent --config config.local.tryhackme.toml --check
 mkdir -p workspace
-# Optionally copy challenge files or room notes into workspace/.
 uv run ctf-agent --config config.local.tryhackme.toml --verbose \
   "I am authorized to assess the active room machine at $TARGET_IP only. First use curl to check its HTTP service and Nmap TCP connect scanning for ports 80 and 443 only. Summarize evidence, save findings.md, and suggest the next step. Do not attempt exploitation or scan other hosts in this run."
 ```
 
-Begin with a narrow task so you can check the evidence and connectivity before
-expanding the scope. Include room-specific constraints and known virtual-host
-names in subsequent prompts. A new CLI invocation starts a new conversation;
-saved workspace files persist, so instruct it to read `findings.md` if relevant.
-This tool does not automatically complete every room or submit flags.
+`--check` validates policy without contacting a model. The normal run then tests
+the real native sandbox before its first model call. A sandbox startup failure
+stops the run; it never switches to direct execution.
 
-Commands see `workspace/` as `/workspace`, read-only by default. Nmap/curl output
-is returned to the model; it can save the relevant evidence with `write_file`.
-Use stdout rather than command options that write into `/workspace`. Increase
-`limits.max_output_bytes` for evidence that otherwise gets truncated, or split
-large tasks. Increasing only the command timeout does not increase turn/call limits.
+Start narrowly so you can check evidence before expanding scope. Include any
+virtual-host names and room-specific constraints. Each invocation starts a new
+conversation while workspace files persist; ask it to read `findings.md` when
+continuing. This CLI does not automatically complete rooms or submit flags.
 
-## 6. Review the record
+Use relative workspace paths. Commands see that directory read-only by default;
+the model can save bounded evidence through `write_file`. Prefer command stdout
+over Nmap/curl options that write workspace files. Split large tasks or adjust
+`limits.max_output_bytes` when evidence is truncated. A higher command timeout
+does not increase the model turn/tool-call budgets.
 
-The CLI prints a path such as `runs/20261025T120000Z-a1b2c3d4e5f6`:
+## 5. Review the record
+
+The CLI prints the run path:
 
 ```sh
 uv run ctf-agent --replay runs/<the-actual-run-id>
 ```
 
-Check the attempted commands, returned evidence, model conclusions, file
-changes and completion status. See [auditing](auditing.md) for restoring the
-starting workspace and retaining the exact tool image. Room machines can reset
-or receive new IPs; update the scope before another live run.
+Inspect the commands, executable hashes/sandbox policy, results, model conclusions,
+file changes and status. [Auditing](auditing.md) explains restoring the starting
+workspace. Native runs use host-installed tools; retain their versions/dependencies
+when reproducing work. [Docker](docker.md) remains available for image-based
+reproducibility and different resource controls. Update target scope after a room
+reset or IP change before another live run.
 
 ## Current limits
 
-- No long-lived sessions or published container ports: reverse-shell callbacks,
-  inbound listeners and interactive shells are outside this workflow.
-- No raw-packet capabilities or privileged execution. Choose unprivileged modes.
-- No browser automation or TryHackMe account integration. Provide task context.
-- HTTP traffic is only represented by what the tool prints. Use
-  [optional mitmproxy capture](mitmproxy.md) for full HTTP exchanges.
+- Network-denied mode is the default. Outbound mode grants broad networking;
+  an IP in the prompt alone does not constrain it.
+- Native commands are short-lived and cleaned up. Long-lived listeners, detached
+  jobs, interactive shells, and reverse-shell workflows are not supported by
+  the default lifecycle. macOS denies listener binding; Linux outbound mode
+  shares host networking, but jobs still end with the command.
+- No raw-packet privileges. Some tools or spawn mechanisms fail under the policy.
+- HTTP evidence is limited to what tools print. Use [optional mitmproxy capture](mitmproxy.md)
+  for request/response records, with proxy-only enforcement supplied by external rules.

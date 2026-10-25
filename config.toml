@@ -32,18 +32,23 @@ allow = ["get_files_info", "get_file_content", "write_file", "run_command"]
 deny_paths = [".env", ".env.*", ".git", ".ssh", "*.pem", "*.key"]
 
 [execution]
-# Build once: docker build -t ctf-agent:local sandbox
-# Commands never pull images and never fall back to host execution.
+# native = Seatbelt on macOS; bubblewrap on Linux. No daemon, VM, or Node.js.
+backend = "native"
+# Extra trusted runtime paths, read-only. Never grant a home/project/root directory.
+read_paths = []
+# Only used by the optional Docker backend.
 image = "ctf-agent:local"
-network = "none"   # 'bridge' explicitly enables outbound access; no target filtering.
+network = "none"   # native: 'outbound'; docker: 'bridge'. Both opt into broad networking.
 writable = false   # Commands see the workspace read-only. write_file still works.
 timeout_seconds = 30
-memory_mb = 256
-cpus = 1
-pids = 64
+memory_mb = 256    # Docker: aggregate memory. Native Linux: per-process address space.
+cpus = 1           # Docker only. Native uses per-process CPU time and a wall timeout.
+pids = 64          # Docker only; native does not promise an aggregate process limit.
 
-# Names map to fixed argv prefixes INSIDE the container. No host shell is used.
+# Names map to trusted argv prefixes. No host shell is used.
 # Extra model-supplied arguments are appended. Python can execute arbitrary code.
 [execution.commands]
 # Ignore Python environment/user-site settings while retaining local imports.
-python = ["/usr/local/bin/python", "-E", "-s", "-B"]
+# Native 'python' selects the interpreter running this CLI, without PATH lookup.
+# For Docker, use the absolute in-image path /usr/local/bin/python instead.
+python = ["python", "-E", "-s", "-B"]

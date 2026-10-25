@@ -48,6 +48,8 @@ class AuditTests(ProjectTest):
         )
         with (
             patch("aiagent.cli.OpenAI", return_value=client),
+            patch("aiagent.native.check_available", return_value="/fake/sandbox"),
+            patch("aiagent.native.probe"),
             redirect_stderr(io.StringIO()),
             redirect_stdout(io.StringIO()),
         ):
@@ -167,13 +169,13 @@ class AuditTests(ProjectTest):
         ok = subprocess.CompletedProcess([], 0, b"container")
         inspected = subprocess.CompletedProcess([], 0, b"sha256:123abc\n")
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
-            patch("aiagent.sandbox.subprocess.run", side_effect=[ok, inspected, ok]),
-            patch("aiagent.sandbox._capture", return_value=(0, b"42", "")) as capture,
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch("aiagent.docker_sandbox.subprocess.run", side_effect=[ok, inspected, ok]),
+            patch("aiagent.docker_sandbox._capture", return_value=(0, b"42", "")) as capture,
         ):
             run_command(
                 self.registry.workspace,
-                self.config.execution,
+                replace(self.config.execution, backend="docker"),
                 1000,
                 "python",
                 ["test.py"],
@@ -192,14 +194,16 @@ class AuditTests(ProjectTest):
         inspected = subprocess.CompletedProcess([], 0, b"sha256:123abc\n")
         record = Mock(side_effect=[AuditError("disk full"), None])
         with (
-            patch("aiagent.sandbox.shutil.which", return_value="/usr/bin/docker"),
-            patch("aiagent.sandbox.subprocess.run", side_effect=[ok, inspected, ok]) as control,
-            patch("aiagent.sandbox._capture") as capture,
+            patch("aiagent.docker_sandbox.shutil.which", return_value="/usr/bin/docker"),
+            patch(
+                "aiagent.docker_sandbox.subprocess.run", side_effect=[ok, inspected, ok]
+            ) as control,
+            patch("aiagent.docker_sandbox._capture") as capture,
         ):
             with self.assertRaises(AuditError):
                 run_command(
                     self.registry.workspace,
-                    self.config.execution,
+                    replace(self.config.execution, backend="docker"),
                     1000,
                     "python",
                     [],

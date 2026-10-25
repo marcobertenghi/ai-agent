@@ -1,79 +1,146 @@
 # Security model
 
+The operator policy, agent code, host OS, installed runtimes and operator account
+are trusted. The model, challenge files and command output are untrusted. Tools
+and named command recipes are default-deny allowlists, enforced on every dispatch.
+Configuration, credentials, system prompts, code and audit records live outside
+the dedicated workspace. Native execution requires a non-root account.
 
-Use **allowlists for tools and commands**, with **deny patterns as additional
-protection for files**. A blacklist of dangerous shell words cannot safely
-constrain arbitrary code. Policy is checked in Python on every dispatch, even
-when the model invents an unadvertised tool or unexpected arguments.
+## Host file tools
 
-Host file tools:
+File tools accept relative workspace paths and reject `..`, absolute paths, NULs
+and backslashes. Each directory is opened relative to a directory descriptor
+with `O_NOFOLLOW`, rather than validating a string and following links later.
+Only regular files with exactly one hard link may be read/written; writes check
+the opened file before truncation. Symlinks, devices, pipes and sockets are blocked.
 
-- Accept relative workspace paths, reject `..`, absolute paths, NULs, and backslashes.
-- Open each directory relative to a directory descriptor using `O_NOFOLLOW`;
-  reject all symlinks, including internal and dangling links.
-- Read/write regular files with exactly one hard link; reject devices, sockets,
-  pipes, and multiply linked files. Writes validate the opened file before truncation.
-- Match denied globs against the entire relative path, its ancestors, and each
-  component, after Unicode normalization and case folding. For example `.git`
-  also blocks `.GIT`, and `private/*` blocks its descendants. This avoids case
-  aliases bypassing policy on macOS filesystems. Listings hide denied names.
-- Bound file sizes, directory listings, argument sizes, and returned output.
+Deny patterns match full paths, ancestors and components after Unicode
+normalization/case folding. Listings hide denied names. File bytes, listing
+entries, tool arguments and returned output are bounded.
 
-Commands:
+## Native execution
 
-- Run in a fresh Docker container with only the dedicated workspace bind-mounted,
-  at `/workspace`; nested mounts are excluded. The repository, `.env`, home
-  directory, Docker socket, and API credentials are not mounted or forwarded.
-- Use a non-root UID, no Linux capabilities, no new privileges, the runtime's
-  default seccomp policy, and a read-only container root. Workspace mounts are
-  read-only by default; `/tmp` is bounded temporary storage.
-- Have no network by default, and have memory, CPU, process, time, and output limits.
-  Container logging is disabled so command output cannot grow Docker log files.
-- Append model arguments after the configured executable inside the container;
-  no model input becomes a Docker option or host shell command.
-- Refuse a workspace containing denied files, links, special files, nested
-  filesystems, or more than 10,000 entries before mounting it. This prevents
-  commands from bypassing file deny rules through the mount.
-- Create the container before starting it, then remove it after completion,
-  output/time limits, errors, or Ctrl-C. A cleanup failure stops the agent and
-  prints the exact removal command. Power loss/SIGKILL cannot run cleanup; check
-  `docker ps -a --filter name=ctf-agent-` after an interrupted host process.
+`execution.backend = "native"` selects built-in Seatbelt on macOS and bubblewrap
+on Linux. There is no daemon, VM, Node.js or socat dependency. Linux requires
+bubblewrap and a kernel/security policy that permits its user namespaces.
+Missing support fails closed; the program never retries a command unsandboxed.
+A fixed, trusted startup probe compiles/applies the real sandbox before any
+model request, and its execution is audited.
 
-“Workspace confinement” means **host file access is confined to the configured
-workspace**. Container programs can read the container's Python installation,
-libraries, `/proc`, and other runtime files; this is necessary to run tools. A
-working directory alone is not a sandbox. Docker supplies the execution boundary;
-containers still share a kernel with their Docker host. Use a disposable VM for
-hostile challenge binaries or higher assurance, and keep Docker patched.
+Both platforms:
 
-The host OS, local Docker daemon, image, configuration, and operator are trusted.
-Do not run the agent as root or modify/mount things into its workspace concurrently
-from another host process. These checks are not a defense against an attacker
-already controlling your user account or Docker daemon. Keep secrets out of the
-workspace even when deny patterns exist. Files/tools are untrusted model context,
-and the system prompt cannot guarantee resistance to prompt injection.
+- Start with networking disabled and a read-only workspace.
+- Grant read access only to the workspace and trusted runtime files, plus a
+  private per-command scratch directory. The active Python runtime/virtualenv
+  is included automatically. The helper is launched with `-I -S`.
+- Build the child environment from a small fixed set. API keys, proxy settings,
+  SSH agents, dynamic-loader variables and other parent variables are not inherited.
+  The child's HOME and temporary directory point at private scratch storage.
+- Pass argv directly, close inherited descriptors, use a separate process group,
+  bound output/time, and remove scratch files after cleanup. No model-controlled
+  text becomes a launcher option or host shell program.
+- Refuse workspaces containing denied files, links, special files, nested
+  filesystems, or more than 10,000 entries before execution. This blocks command
+  access to data that file deny rules would hide. Do not modify the workspace
+  concurrently from another host process.
 
-An allowlisted interpreter can execute arbitrary in-container code, launch other
-installed programs, and read workspace files regardless of which file tools are
-advertised. For strict file-only access, remove `run_command`. Enabling
-`execution.writable` also requires `write_file` in the allowlist, but then commands
-can modify/delete workspace data directly; deny globs cannot restrict names they
-create. There is no bind-mount disk quota. Use disposable data and VM/filesystem
-quotas for writable execution.
+On **macOS**, the Seatbelt profile starts with `(deny default)`. File contents
+and directory listings are granted to read roots; writes are granted only to
+scratch and, if explicitly enabled, the workspace. Path metadata is readable
+for interpreter/symlink resolution, and names directly under `/` are visible.
+This is not a chroot and does not conceal the existence/metadata of every host
+file. Host-file contents outside the read allowances remain blocked.
 
-`network = "bridge"` allows general outbound traffic, including possibly the
-local network/Docker host. It does **not** enforce target allowlists. For network
-labs, use a dedicated VM and network-level egress rules for authorized targets;
-the CLI deliberately has no arbitrary Docker flags, host network, or privileged
-mode. Some raw-packet tools will not work with the default restrictions.
+The profile permits ordinary fork/exec child processes, with the same kernel
+restrictions inherited by descendants. It denies `setsid`, `setpgid`, and the
+`posix_spawn` syscall, whose flags otherwise provide a second detachment route.
+Process-group cleanup runs on completion, failure, timeout, output limits and
+Ctrl-C. Software that requires `posix_spawn`, new sessions, GUI/Mach services,
+interactive terminals or long-lived background jobs may fail under this policy.
+The runner deliberately does not grant general Mach/XPC or Unix-socket access.
 
-Prompts, file contents returned by tools, and command output go to the configured
-model provider. Use data you are allowed to send there. Turn/token
-limits bound the loop; they are not an exact monetary budget or disk quota.
+On **Linux**, bubblewrap starts with an empty root, read-only runtime binds, an
+isolated PID/IPC/user/network namespace, a fresh `/proc` and `/dev`, and no Linux
+capabilities. It uses `--new-session`, `--die-with-parent`, and a read-only root;
+only the workspace (when opted in) and scratch/tmp mounts are writable. The host
+home, `/run`, Docker socket and host `/proc` are not exposed. User-namespace or
+AppArmor restrictions may stop bubblewrap from starting. Configure an appropriate
+distribution policy or use the optional Docker backend; the agent does not
+change system-wide security settings.
 
+## Trusted runtime read paths
 
-Audit bundles are stored outside the workspace and are never mounted into commands.
-See [auditing](auditing.md) for log sensitivity and integrity limitations.
+The baseline is in `aiagent/native_policy.toml`. `execution.read_paths` adds
+specific tool/library/data paths. All remain read-only. Paths overlapping the
+workspace or exposing the configured policy, prompt, `.env` or audit directory
+are rejected. For other secrets, keep them out of every runtime allowance.
+Never add `/`, a home directory, or a whole project directory. A custom runtime
+allowance is access to *all readable content underneath it*, not just executables.
+Direct sockets/devices and host process/device/IPC directories are rejected.
+Keep sockets out of every other allowed runtime directory too: on Linux, a
+read-only socket bind can still grant access to the service behind that socket.
 
-References: [Docker runtime options](https://docs.docker.com/reference/cli/docker/container/run/)
-and [bind-mount isolation](https://docs.docker.com/engine/storage/bind-mounts/).
+A program needs its interpreter, libraries, certificates and tool data outside
+the workspace. Those are explicit runtime exceptions to data confinement.
+The agent is not restricted to only four executable binaries: an allowlisted
+Python interpreter permits arbitrary code and other installed programs reachable
+inside its sandbox. Removing a tool recipe does not prevent another interpreter
+from implementing the same operation. For strict file-only access, remove
+`run_command` from `tools.allow`.
+
+## Networking and VPNs
+
+Native `network = "none"` blocks network use. Native `network = "outbound"`
+explicitly grants broad IP egress using the host/VPN network. On macOS it does
+not grant inbound listeners or general Unix-socket access. Linux outbound mode
+shares the host network namespace and is not an inbound-listener restriction.
+Neither mode enforces target IP/domain/port allowlists. In outbound mode, local
+services may be reachable too; an unsafe local service can expose additional
+host authority. Use a dedicated lab environment and network-level rules for
+enforced target scope. Do not treat a target address in the prompt as a firewall.
+
+The lightweight implementation does not include a network broker. `socat` is a
+relay, not a filesystem sandbox or an egress policy. An explicit HTTP proxy such
+as [mitmproxy](mitmproxy.md) can record web traffic, but programs can bypass it
+unless external network controls require proxy-only traffic. Raw-packet tools
+may require privileges that these policies intentionally do not supply.
+
+## Resource and lifecycle limits
+
+| Limit | Native macOS | Native Linux | Optional Docker |
+| --- | --- | --- | --- |
+| Wall timeout and output bytes | Yes | Yes | Yes |
+| CPU time | Per process, timeout seconds | Per process, timeout seconds | Aggregate CPU quota |
+| Memory | No hard memory limit promised | Per-process address space via `memory_mb` | Aggregate memory/swap limit |
+| Open files/core dumps | 256 descriptors / no core | 256 descriptors / no core | Descriptor/core limits |
+| Native file size | 64 MiB per file | 64 MiB per file | No workspace file-size quota |
+| `cpus` / `pids` settings | Not applied | Not applied | Applied |
+| Aggregate process/disk budget | No | No | PID cap; workspace disk has no quota |
+
+Per-process limits do not contain aggregate fork/memory/disk exhaustion.
+Native execution shares the host kernel and uses the host's installed programs.
+It is intended for controlled lab tooling; use a disposable VM and appropriate
+quotas for hostile binaries or stronger resource containment. Docker is an
+[optional, image-based backend](docker.md), with its own trust assumptions.
+SIGKILL/power loss cannot run host cleanup; a native process group may survive
+an abruptly killed runner. There is no promise of background-job supervision
+across host crashes.
+
+## Model context and evidence
+
+Prompts, returned file contents and tool output go to the configured provider.
+Use data you may send there. System-prompt instructions do not guarantee prompt
+injection resistance. Workspace writes are reversible only if you have suitable
+backups; with `execution.writable = true`, commands can modify/delete task data
+and create names matching deny patterns. Preflight checks cannot restrict files
+a running command itself creates. Deny rules are additional protection, not a
+place to store secrets safely.
+
+Audit records remain outside the workspace and are not visible to commands.
+See [auditing](auditing.md) for exact records, sensitive-data handling and
+integrity limits. These restrictions do not defend against an attacker already
+controlling your user account, trusted runtimes, configuration or Docker daemon.
+
+References: [macOS Seatbelt concepts](https://chromium.googlesource.com/chromium/src/+/main/sandbox/mac/README.md),
+[bubblewrap's security model](https://github.com/containers/bubblewrap),
+[Docker runtime options](https://docs.docker.com/reference/cli/docker/container/run/).

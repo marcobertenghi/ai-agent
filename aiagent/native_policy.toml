@@ -1,0 +1,18 @@
+# Trusted runtime read allowances. These are NOT general data directories.
+# Keep credentials, prompts, audit bundles, and project data out of these paths.
+# Missing OS paths are skipped. execution.read_paths adds per-project allowances.
+[darwin]
+read_paths = [
+  "/System/Library", "/usr/lib", "/usr/share", "/usr/bin", "/usr/sbin", "/bin", "/sbin",
+  "/Library/Apple", "/System/Volumes/Preboot/Cryptexes/OS/usr/lib",
+  "/private/etc/ssl/cert.pem", "/private/etc/ssl/openssl.cnf",
+  "/private/etc/hosts", "/private/etc/resolv.conf",
+  "/private/etc/services", "/private/etc/protocols",
+]
+
+[linux]
+read_paths = [
+  "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64", "/usr/share",
+  "/bin", "/sbin", "/lib", "/lib64", "/etc/ld.so.cache",
+  "/etc/ssl/certs", "/etc/ssl/openssl.cnf", "/etc/hosts", "/etc/resolv.conf", "/etc/services", "/etc/protocols",
+]

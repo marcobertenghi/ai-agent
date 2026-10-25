@@ -59,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"Command network: {config.execution.network}; writable: {config.execution.writable}"
             )
-            print("Docker availability and image isolation are not checked by --check.")
+            print(f"Execution backend: {config.execution.backend}")
+            print("Runtime availability and isolation are not checked by --check.")
             print(f"Audit directory: {config.audit.directory}")
             return 0
         load_dotenv(config.path.parent / ".env", override=False)
@@ -68,11 +69,19 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError(
                 f"Set {config.provider.api_key_env} in the environment or .env next to the config"
             )
+        if "run_command" in config.allowed_tools and config.execution.backend == "native":
+            from aiagent.native import check_available
+
+            check_available()
         config.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
         audit = AuditRun(config, registry.workspace, args.prompt)
         print(f"Audit: {audit.path}", file=sys.stderr)
         with audit:
             registry.record = audit.record
+            if "run_command" in config.allowed_tools and config.execution.backend == "native":
+                from aiagent.native import probe
+
+                probe(registry.workspace, config.execution, record=audit.record)
             with OpenAI(
                 base_url=config.provider.base_url,
                 api_key=api_key,

@@ -64,7 +64,8 @@ class ToolRegistry:
                 self.workspace.write,
             ),
             "run_command": Tool(
-                "Run a configured command in an isolated container at /workspace. "
+                f"Run a configured command with the {config.execution.backend} sandbox. "
+                "Paths are relative to the workspace. "
                 f"Network: {config.execution.network}; writable: {config.execution.writable}",
                 {
                     "command": {"type": "string", "enum": list(config.execution.commands)},

@@ -9,6 +9,15 @@ from urllib.parse import urlsplit
 TOOL_NAMES = {"get_files_info", "get_file_content", "write_file", "run_command"}
 
 
+def path_within(path: Path, directory: Path) -> bool:
+    """Containment including case/firmlink aliases on existing filesystems."""
+    if path.is_relative_to(directory):
+        return True
+    if not directory.exists():
+        return False
+    return any(directory.samefile(parent) for parent in (path, *path.parents) if parent.exists())
+
+
 class ConfigError(ValueError):
     """An invalid or unsafe operator configuration."""
 
@@ -41,6 +50,9 @@ class Execution:
     cpus: int
     pids: int
     commands: dict[str, tuple[str, ...]]
+    backend: str = "native"
+    read_paths: tuple[Path, ...] = ()
+    protected_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -188,14 +200,25 @@ def load_config(path: Path) -> Config:
             "cpus",
             "pids",
             "commands",
+            "backend",
+            "read_paths",
         },
+    )
+    backend = _text(execution, "backend")
+    if backend not in {"native", "docker"}:
+        raise ConfigError(
+            "backend must be 'native' or 'docker'; unsandboxed execution is forbidden"
+        )
+    read_paths = tuple(
+        (path.parent / value).resolve(strict=True) for value in _strings(execution, "read_paths")
     )
     image = _text(execution, "image")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", image):
         raise ConfigError("Invalid container image name")
     network = _text(execution, "network")
-    if network not in {"none", "bridge"}:
-        raise ConfigError("network must be 'none' or 'bridge'; host networking is forbidden")
+    networks = {"none", "outbound"} if backend == "native" else {"none", "bridge"}
+    if network not in networks:
+        raise ConfigError(f"network must be one of {sorted(networks)} for backend {backend}")
     writable = execution.get("writable")
     if type(writable) is not bool:
         raise ConfigError("writable must be a boolean")
@@ -209,8 +232,12 @@ def load_config(path: Path) -> Config:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name):
             raise ConfigError("Command names must be simple identifiers")
         argv = _strings(commands, name, unique=False)
-        if not argv or not argv[0].startswith("/"):
-            raise ConfigError(f"Command {name} must start with an absolute in-container executable")
+        if not argv or (
+            not argv[0].startswith("/") and not (backend == "native" and argv[0] == "python")
+        ):
+            raise ConfigError(
+                f"Command {name} requires an absolute executable, or 'python' with native"
+            )
         recipes[name] = argv
     if "run_command" in allowed and not recipes:
         raise ConfigError("run_command requires at least one configured command")
@@ -234,6 +261,9 @@ def load_config(path: Path) -> Config:
             _integer(execution, "cpus", 1, 4),
             _integer(execution, "pids", 8, 256),
             recipes,
+            backend,
+            read_paths,
+            (path, prompt, (path.parent / ".env").resolve(), audit_dir),
         ),
         audit_obj,
     )
